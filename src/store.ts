@@ -20,6 +20,7 @@ export interface IStore {
   entries(): JSONObject;
 }
 
+// Stores permissions set by @Restrict decorator, keyed by class prototype
 const permissionsMap = new WeakMap<object, Map<string, Permission>>();
 
 function getPermissionForKey(instance: Store, key: string): Permission {
@@ -38,14 +39,6 @@ function getPermissionForKey(instance: Store, key: string): Permission {
   }
 
   return instance.defaultPolicy;
-}
-
-function canRead(permission: Permission): boolean {
-  return permission === "r" || permission === "rw";
-}
-
-function canWrite(permission: Permission): boolean {
-  return permission === "w" || permission === "rw";
 }
 
 function isJSONObject(value: unknown): value is JSONObject {
@@ -92,11 +85,13 @@ export class Store implements IStore {
   private dynamicValues = new Map<string, StoreValue>();
 
   allowedToRead(key: string): boolean {
-    return canRead(getPermissionForKey(this, key));
+    const permission = getPermissionForKey(this, key);
+    return permission === "r" || permission === "rw";
   }
 
   allowedToWrite(key: string): boolean {
-    return canWrite(getPermissionForKey(this, key));
+    const permission = getPermissionForKey(this, key);
+    return permission === "w" || permission === "rw";
   }
 
   read(path: string): StoreResult {
