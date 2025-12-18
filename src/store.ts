@@ -1,4 +1,4 @@
-import { JSONArray, JSONObject, JSONPrimitive } from "./json-types";
+import { JSONArray, JSONObject, JSONPrimitive, JSONValue } from "./json-types";
 
 export type Permission = "r" | "w" | "rw" | "none";
 
@@ -20,33 +20,184 @@ export interface IStore {
   entries(): JSONObject;
 }
 
-export function Restrict(...params: unknown[]): any {
+const permissionsMap = new WeakMap<object, Map<string, Permission>>();
+
+function getPermissionForKey(instance: Store, key: string): Permission {
+  const instancePermissions = permissionsMap.get(instance);
+  if (instancePermissions?.has(key)) {
+    return instancePermissions.get(key)!;
+  }
+
+  let prototype = Object.getPrototypeOf(instance);
+  while (prototype) {
+    const classPermissions = permissionsMap.get(prototype);
+    if (classPermissions?.has(key)) {
+      return classPermissions.get(key)!;
+    }
+    prototype = Object.getPrototypeOf(prototype);
+  }
+
+  return instance.defaultPolicy;
+}
+
+function canRead(permission: Permission): boolean {
+  return permission === "r" || permission === "rw";
+}
+
+function canWrite(permission: Permission): boolean {
+  return permission === "w" || permission === "rw";
+}
+
+function isJSONObject(value: unknown): value is JSONObject {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !(value instanceof Store)
+  );
+}
+
+function convertToStoreValue(value: JSONValue): StoreValue {
+  if (isJSONObject(value)) {
+    const store = new Store();
+    store.writeEntries(value);
+    return store;
+  }
+  return value as StoreValue;
+}
+
+function resolveValue(value: unknown): StoreResult {
+  if (typeof value === "function") {
+    return value();
+  }
+  return value as StoreResult;
+}
+
+export function Restrict(permission: Permission = "none"): PropertyDecorator {
+  return function (target: object, propertyKey: string | symbol) {
+    const key = String(propertyKey);
+
+    if (!permissionsMap.has(target)) {
+      permissionsMap.set(target, new Map());
+    }
+
+    permissionsMap.get(target)!.set(key, permission);
+  };
 }
 
 export class Store implements IStore {
+  [key: string]: unknown;
+
   defaultPolicy: Permission = "rw";
+  private dynamicValues = new Map<string, StoreValue>();
 
   allowedToRead(key: string): boolean {
-    throw new Error("Method not implemented.");
+    return canRead(getPermissionForKey(this, key));
   }
 
   allowedToWrite(key: string): boolean {
-    throw new Error("Method not implemented.");
+    return canWrite(getPermissionForKey(this, key));
   }
 
   read(path: string): StoreResult {
-    throw new Error("Method not implemented.");
+    const [key, ...rest] = path.split(":");
+
+    if (!this.allowedToRead(key)) {
+      throw new Error(`Read access denied for key: ${key}`);
+    }
+
+    const rawValue = this.getRawValue(key);
+    const value = resolveValue(rawValue);
+
+    if (rest.length === 0) {
+      return value;
+    }
+
+    if (value instanceof Store) {
+      return value.read(rest.join(":"));
+    }
+
+    return undefined;
   }
 
   write(path: string, value: StoreValue): StoreValue {
-    throw new Error("Method not implemented.");
+    const [key, ...rest] = path.split(":");
+
+    if (rest.length === 0) {
+      if (!this.allowedToWrite(key)) {
+        throw new Error(`Write access denied for key: ${key}`);
+      }
+      const storeValue = isJSONObject(value)
+        ? convertToStoreValue(value as JSONObject)
+        : value;
+      this.setRawValue(key, storeValue);
+      return storeValue;
+    }
+
+    if (!this.allowedToRead(key)) {
+      throw new Error(`Read access denied for key: ${key}`);
+    }
+
+    let nestedStore = resolveValue(this.getRawValue(key));
+
+    if (nestedStore instanceof Store) {
+      return nestedStore.write(rest.join(":"), value);
+    }
+
+    if (!this.allowedToWrite(key)) {
+      throw new Error(`Write access denied for key: ${key}`);
+    }
+
+    nestedStore = new Store();
+    this.setRawValue(key, nestedStore);
+    return nestedStore.write(rest.join(":"), value);
   }
 
   writeEntries(entries: JSONObject): void {
-    throw new Error("Method not implemented.");
+    for (const [key, value] of Object.entries(entries)) {
+      this.write(key, convertToStoreValue(value));
+    }
   }
 
   entries(): JSONObject {
-    throw new Error("Method not implemented.");
+    const result: JSONObject = {};
+    const allKeys = this.getAllKeys();
+
+    for (const key of allKeys) {
+      if (this.allowedToRead(key)) {
+        const value = resolveValue(this.getRawValue(key));
+        if (value instanceof Store) {
+          result[key] = value.entries();
+        } else if (value !== undefined) {
+          result[key] = value as JSONValue;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private getRawValue(key: string): StoreValue | undefined {
+    if (key in this && key !== "dynamicValues" && key !== "defaultPolicy") {
+      return this[key] as StoreValue;
+    }
+    return this.dynamicValues.get(key);
+  }
+
+  private setRawValue(key: string, value: StoreValue): void {
+    if (key in this && key !== "dynamicValues" && key !== "defaultPolicy") {
+      this[key] = value;
+    } else {
+      this.dynamicValues.set(key, value);
+    }
+  }
+
+  private getAllKeys(): string[] {
+    const classKeys = Object.keys(this).filter(
+      (k) => k !== "dynamicValues" && k !== "defaultPolicy"
+    );
+    const dynamicKeys = Array.from(this.dynamicValues.keys());
+    const uniqueKeys = new Set([...classKeys, ...dynamicKeys]);
+    return Array.from(uniqueKeys);
   }
 }
