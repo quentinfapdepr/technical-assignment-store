@@ -2,6 +2,8 @@ import { lazy } from "./lazy";
 import { Restrict, Store } from "./store";
 import { UserStore } from "./userStore";
 
+
+
 export class AdminStore extends Store {
   @Restrict("r")
   public user: UserStore;
